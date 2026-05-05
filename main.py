@@ -3,6 +3,7 @@ import re
 import time
 import zipfile
 import datetime
+import asyncio
 import smtplib
 from email.message import EmailMessage
 from collections import defaultdict
@@ -34,7 +35,7 @@ albums = defaultdict(list)
 album_time = {}
 
 # =========================
-# UTILS
+# HELPERS
 # =========================
 
 def extract_number(text: str):
@@ -66,7 +67,7 @@ def send_email(subject, zip_path):
 # CORE PROCESSING
 # =========================
 
-async def process_and_send(photos, number, context, update):
+async def process_and_send(photos, number, update, context):
     date = datetime.datetime.now().strftime("%Y-%m-%d")
     folder_name = f"{date}_вагон_{number}"
 
@@ -87,7 +88,7 @@ async def process_and_send(photos, number, context, update):
         await update.message.reply_text("Я все сохранил!")
 
 # =========================
-# HANDLER: PHOTO
+# PHOTO HANDLER
 # =========================
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -114,56 +115,61 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # одиночное фото
-    await process_and_send([message.photo[-1]], number, context, update)
+    await process_and_send([message.photo[-1]], number, update, context)
 
 # =========================
-# FLUSH ALBUMS (сбор альбомов)
+# ALBUM WATCHER (async вместо JobQueue)
 # =========================
 
-async def flush_albums(context: ContextTypes.DEFAULT_TYPE):
-    now = time.time()
-    to_remove = []
+async def album_watcher(app):
+    while True:
+        now = time.time()
+        to_remove = []
 
-    for group_id, photos in albums.items():
-        if now - album_time[group_id] < 3:
-            continue
+        for group_id, photos in albums.items():
+            if now - album_time[group_id] < 3:
+                continue
 
-        if not photos:
-            continue
+            if not photos:
+                continue
 
-        # номер берём из caption первого сообщения (упрощение)
-        number = "00000000"
+            # номер берём из caption первого фото (упрощённо)
+            number = "00000000"
 
-        await process_and_send(photos, number, context, None)
+            await process_and_send(photos, number, None, app)
 
-        to_remove.append(group_id)
+            to_remove.append(group_id)
 
-    for gid in to_remove:
-        albums.pop(gid, None)
-        album_time.pop(gid, None)
+        for gid in to_remove:
+            albums.pop(gid, None)
+            album_time.pop(gid, None)
+
+        await asyncio.sleep(3)
 
 # =========================
 # START
 # =========================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Я запущен и работаю в группе 🤖")
+    await update.message.reply_text("Я запущен и работаю 🤖")
 
 # =========================
 # MAIN
 # =========================
 
-def main():
+async def main():
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
-    # периодическая проверка альбомов
-    job_queue = app.job_queue
-    job_queue.run_repeating(flush_albums, interval=3)
+    asyncio.create_task(album_watcher(app))
 
-    app.run_polling()
+    await app.run_polling()
+
+# =========================
+# ENTRY POINT
+# =========================
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
