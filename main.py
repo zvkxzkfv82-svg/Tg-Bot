@@ -56,9 +56,9 @@ def send_email(subject, zip_path):
         )
 
     with smtplib.SMTP("smtp.yandex.ru", 587) as smtp:
-    smtp.starttls()
-    smtp.login(EMAIL_USER, EMAIL_PASS)
-    smtp.send_message(msg)
+        smtp.starttls()
+        smtp.login(EMAIL_USER, EMAIL_PASS)
+        smtp.send_message(msg)
 
 # =========================
 # ZIP + SEND
