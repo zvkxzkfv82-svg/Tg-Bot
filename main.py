@@ -221,3 +221,4 @@ def test_sendgrid():
     print("TEST STATUS:", r.status_code)
     print("TEST BODY:", r.text)
 test_sendgrid()
+print("EMAIL_FROM =", repr(EMAIL_FROM))
