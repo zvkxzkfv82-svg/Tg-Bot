@@ -3,13 +3,20 @@ import re
 import time
 import zipfile
 import datetime
-import smtplib
-from email.message import EmailMessage
+import base64
+import requests
+
 from collections import defaultdict
 from threading import Timer
 
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
 
 # =========================
 # ENV
@@ -17,9 +24,9 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Con
 
 TOKEN = os.getenv("BOT_TOKEN")
 
-EMAIL_USER = os.getenv("EMAIL_USER")
-EMAIL_PASS = os.getenv("EMAIL_PASS")
+EMAIL_FROM = os.getenv("EMAIL_FROM")
 EMAIL_TO = os.getenv("EMAIL_TO")
+SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 
 # =========================
 # MEMORY
@@ -40,25 +47,55 @@ def extract_number(text: str):
         return None
     return match.group(0).replace("-", "")
 
-def send_email(subject, zip_path):
-    msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"] = EMAIL_USER
-    msg["To"] = EMAIL_TO
-    msg.set_content("Архив с фото во вложении")
+# =========================
+# SEND EMAIL (SendGrid API)
+# =========================
 
-    with open(zip_path, "rb") as f:
-        msg.add_attachment(
-            f.read(),
-            maintype="application",
-            subtype="zip",
-            filename=os.path.basename(zip_path),
+def send_email(subject, zip_path):
+    try:
+        print("📧 START EMAIL:", subject)
+
+        with open(zip_path, "rb") as f:
+            encoded = base64.b64encode(f.read()).decode()
+
+        payload = {
+            "personalizations": [
+                {
+                    "to": [{"email": EMAIL_TO}],
+                    "subject": subject
+                }
+            ],
+            "from": {"email": EMAIL_FROM},
+            "content": [
+                {
+                    "type": "text/plain",
+                    "value": "Архив с фото во вложении"
+                }
+            ],
+            "attachments": [
+                {
+                    "content": encoded,
+                    "type": "application/zip",
+                    "filename": f"{subject}.zip"
+                }
+            ]
+        }
+
+        headers = {
+            "Authorization": f"Bearer {SENDGRID_API_KEY}",
+            "Content-Type": "application/json"
+        }
+
+        response = requests.post(
+            "https://api.sendgrid.com/v3/mail/send",
+            json=payload,
+            headers=headers
         )
 
-    with smtplib.SMTP("smtp.yandex.ru", 587) as smtp:
-        smtp.starttls()
-        smtp.login(EMAIL_USER, EMAIL_PASS)
-        smtp.send_message(msg)
+        print("SENDGRID STATUS:", response.status_code, response.text)
+
+    except Exception as e:
+        print("❌ EMAIL ERROR:", e)
 
 # =========================
 # ZIP + SEND
@@ -93,7 +130,7 @@ async def flush_album(group_id, context):
     if not photos:
         return
 
-    # номер пытаемся взять из первого доступного caption
+    # пока упрощённо
     number = "00000000"
 
     await process_and_send(photos, number, None, context)
@@ -102,13 +139,16 @@ async def flush_album(group_id, context):
     album_time.pop(group_id, None)
 
 # =========================
-# TIMER (СТАБИЛЬНО ВМЕСТО LOOP)
+# TIMER
 # =========================
 
 def schedule_flush(group_id, context):
     def run():
         import asyncio
-        asyncio.run_coroutine_threadsafe(flush_album(group_id, context), context.application.loop)
+        asyncio.run_coroutine_threadsafe(
+            flush_album(group_id, context),
+            context.application.loop
+        )
 
     Timer(3, run).start()
 
@@ -131,7 +171,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     group_id = message.media_group_id
 
-    # если альбом
+    # альбом
     if group_id:
         albums[group_id].append(message.photo[-1])
         album_time[group_id] = time.time()
