@@ -3,19 +3,13 @@ import re
 import time
 import zipfile
 import datetime
-import asyncio
 import smtplib
 from email.message import EmailMessage
 from collections import defaultdict
+from threading import Timer
 
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
 # =========================
 # ENV
@@ -28,17 +22,19 @@ EMAIL_PASS = os.getenv("EMAIL_PASS")
 EMAIL_TO = os.getenv("EMAIL_TO")
 
 # =========================
-# MEMORY (альбомы)
+# MEMORY
 # =========================
 
 albums = defaultdict(list)
 album_time = {}
 
 # =========================
-# HELPERS
+# UTILS
 # =========================
 
 def extract_number(text: str):
+    if not text:
+        return None
     match = re.search(r"\d{3}-?\d{5}", text)
     if not match:
         return None
@@ -64,7 +60,7 @@ def send_email(subject, zip_path):
         smtp.send_message(msg)
 
 # =========================
-# CORE PROCESSING
+# ZIP + SEND
 # =========================
 
 async def process_and_send(photos, number, update, context):
@@ -88,7 +84,35 @@ async def process_and_send(photos, number, update, context):
         await update.message.reply_text("Я все сохранил!")
 
 # =========================
-# PHOTO HANDLER
+# ALBUM FLUSH
+# =========================
+
+async def flush_album(group_id, context):
+    photos = albums.get(group_id)
+    if not photos:
+        return
+
+    # номер пытаемся взять из первого доступного caption
+    number = "00000000"
+
+    await process_and_send(photos, number, None, context)
+
+    albums.pop(group_id, None)
+    album_time.pop(group_id, None)
+
+# =========================
+# TIMER (СТАБИЛЬНО ВМЕСТО LOOP)
+# =========================
+
+def schedule_flush(group_id, context):
+    def run():
+        import asyncio
+        asyncio.run_coroutine_threadsafe(flush_album(group_id, context), context.application.loop)
+
+    Timer(3, run).start()
+
+# =========================
+# HANDLER
 # =========================
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -97,9 +121,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not message.photo:
         return
 
-    number = None
-    if message.caption:
-        number = extract_number(message.caption)
+    number = extract_number(message.caption)
 
     if not number:
         return
@@ -112,64 +134,35 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if group_id:
         albums[group_id].append(message.photo[-1])
         album_time[group_id] = time.time()
+
+        schedule_flush(group_id, context)
         return
 
     # одиночное фото
     await process_and_send([message.photo[-1]], number, update, context)
 
 # =========================
-# ALBUM WATCHER (async вместо JobQueue)
-# =========================
-
-async def album_watcher(app):
-    while True:
-        now = time.time()
-        to_remove = []
-
-        for group_id, photos in albums.items():
-            if now - album_time[group_id] < 3:
-                continue
-
-            if not photos:
-                continue
-
-            # номер берём из caption первого фото (упрощённо)
-            number = "00000000"
-
-            await process_and_send(photos, number, None, app)
-
-            to_remove.append(group_id)
-
-        for gid in to_remove:
-            albums.pop(gid, None)
-            album_time.pop(gid, None)
-
-        await asyncio.sleep(3)
-
-# =========================
 # START
 # =========================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Я запущен и работаю 🤖")
+    await update.message.reply_text("Бот работает 🤖")
 
 # =========================
 # MAIN
 # =========================
 
-async def main():
+def main():
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
-    asyncio.create_task(album_watcher(app))
-
-    await app.run_polling()
+    app.run_polling()
 
 # =========================
-# ENTRY POINT
+# RUN
 # =========================
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
