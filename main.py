@@ -207,4 +207,17 @@ def main():
 
 if __name__ == "__main__":
     main()
-print("KEY:", SENDGRID_API_KEY)
+# врем
+def test_sendgrid():
+    import requests
+
+    r = requests.get(
+        "https://api.sendgrid.com/v3/user/account",
+        headers={
+            "Authorization": f"Bearer {SENDGRID_API_KEY}"
+        }
+    )
+
+    print("TEST STATUS:", r.status_code)
+    print("TEST BODY:", r.text)
+test_sendgrid()
