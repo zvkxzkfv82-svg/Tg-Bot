@@ -207,3 +207,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+print("KEY:", SENDGRID_API_KEY)
