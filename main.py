@@ -3,7 +3,7 @@ import re
 import zipfile
 import datetime
 import asyncio
-
+import time
 from collections import defaultdict
 
 from telegram import Update
@@ -25,9 +25,9 @@ TOKEN = os.getenv("BOT_TOKEN")
 # STATE
 # =========================
 
-albums = defaultdict(list)
+album_buffer = defaultdict(set)      # file_ids
 album_numbers = {}
-album_tasks = {}  # debounce tasks
+album_last_update = {}
 
 processed_count = 0
 stats_chat_id = None
@@ -48,7 +48,7 @@ def extract_number(text: str):
 # ZIP + SEND
 # =========================
 
-async def process_and_send(photos, number, update, context):
+async def process_and_send(photo_wrappers, number, update, context):
     global processed_count
 
     date = datetime.datetime.now().strftime("%Y-%m-%d")
@@ -56,7 +56,7 @@ async def process_and_send(photos, number, update, context):
     zip_path = f"/tmp/{folder_name}.zip"
 
     with zipfile.ZipFile(zip_path, "w") as zipf:
-        for i, photo in enumerate(photos):
+        for i, photo in enumerate(photo_wrappers):
             file = await context.bot.get_file(photo.file_id)
 
             file_path = f"/tmp/{photo.file_id}.jpg"
@@ -77,24 +77,7 @@ async def process_and_send(photos, number, update, context):
     processed_count += 1
 
 # =========================
-# FINALIZE ALBUM (DEBOUNCE)
-# =========================
-
-async def finalize_album(group_id, update, context):
-    await asyncio.sleep(2)
-
-    photos = albums.get(group_id, [])
-    number = album_numbers.get(group_id)
-
-    if photos and number:
-        await process_and_send(photos, number, update, context)
-
-    albums.pop(group_id, None)
-    album_numbers.pop(group_id, None)
-    album_tasks.pop(group_id, None)
-
-# =========================
-# HANDLER
+# PHOTO HANDLER
 # =========================
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -108,24 +91,54 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     group_id = message.media_group_id
+    photo = message.photo[-1]
 
     # одиночное фото
     if not group_id:
-        await process_and_send([message.photo[-1]], number, update, context)
+        await process_and_send([photo], number, update, context)
         return
 
-    # сохраняем фото в альбом
-    albums[group_id].append(message.photo[-1])
+    # альбом
+    album_buffer[group_id].add(photo.file_id)
     album_numbers[group_id] = number
+    album_last_update[group_id] = time.time()
 
-    # debounce: отменяем старую задачу
-    if group_id in album_tasks:
-        album_tasks[group_id].cancel()
+# =========================
+# ALBUM WATCHER (STABLE)
+# =========================
 
-    # создаём новую задачу
-    album_tasks[group_id] = asyncio.create_task(
-        finalize_album(group_id, update, context)
-    )
+async def album_watcher(app):
+    while True:
+        await asyncio.sleep(1)
+
+        now = time.time()
+
+        for group_id in list(album_buffer.keys()):
+            last = album_last_update.get(group_id, 0)
+
+            # ждём стабилизации альбома
+            if now - last > 3:
+
+                # финальная защита от “долетающих” фото
+                await asyncio.sleep(1)
+
+                if time.time() - album_last_update.get(group_id, 0) < 2:
+                    continue
+
+                file_ids = list(album_buffer[group_id])
+                number = album_numbers.get(group_id)
+
+                photos = [
+                    type("P", (), {"file_id": fid})
+                    for fid in file_ids
+                ]
+
+                if photos and number:
+                    await process_and_send(photos, number, None, app)
+
+                album_buffer.pop(group_id, None)
+                album_numbers.pop(group_id, None)
+                album_last_update.pop(group_id, None)
 
 # =========================
 # STATS LOOP
@@ -162,6 +175,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 
 async def post_init(app):
+    asyncio.create_task(album_watcher(app))
     asyncio.create_task(stats_loop(app))
 
 # =========================
