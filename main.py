@@ -49,7 +49,7 @@ def extract_number(text: str):
 # ZIP + SEND
 # =========================
 
-async def process_and_send(photos, number, update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def process_and_send(photos, number, update, context):
     global processed_count
 
     date = datetime.datetime.now().strftime("%Y-%m-%d")
@@ -98,13 +98,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await process_and_send([message.photo[-1]], number, update, context)
         return
 
-    # альбом
+    # альбом: копим
     albums[group_id].append(message.photo[-1])
     album_numbers[group_id] = number
     album_timers[group_id] = time.time()
 
 # =========================
-# ALBUM WATCHER (DEBOUNCE)
+# ALBUM WATCHER (DEBOUNCE ENGINE)
 # =========================
 
 async def album_watcher(app):
@@ -116,6 +116,7 @@ async def album_watcher(app):
         for group_id in list(albums.keys()):
             last_time = album_timers.get(group_id)
 
+            # если 2 секунды тишины → финал
             if last_time and now - last_time > 2:
                 photos = albums[group_id]
                 number = album_numbers.get(group_id)
@@ -162,12 +163,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Бот работает 🤖")
 
 # =========================
-# POST INIT
+# POST INIT (ПРАВИЛЬНЫЙ СПОСОБ)
 # =========================
 
 async def post_init(app):
-    app.create_task(stats_loop(app))
-    app.create_task(album_watcher(app))
+    asyncio.create_task(stats_loop(app))
+    asyncio.create_task(album_watcher(app))
 
 # =========================
 # MAIN
