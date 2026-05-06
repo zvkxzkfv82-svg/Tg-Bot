@@ -22,11 +22,14 @@ from telegram.ext import (
 TOKEN = os.getenv("BOT_TOKEN")
 
 # =========================
-# MEMORY
+# STATE
 # =========================
 
 albums = defaultdict(list)
 album_numbers = {}
+
+processed_count = 0
+stats_chat_id = None
 
 # =========================
 # UTILS
@@ -41,15 +44,16 @@ def extract_number(text: str):
     return match.group(0).replace("-", "")
 
 # =========================
-# ZIP + SEND TO TELEGRAM
+# ZIP + SEND
 # =========================
 
 async def process_and_send(photos, number, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global processed_count
+
     date = datetime.datetime.now().strftime("%Y-%m-%d")
     folder_name = f"{date}_вагон_{number}"
     zip_path = f"/tmp/{folder_name}.zip"
 
-    # создаём архив
     with zipfile.ZipFile(zip_path, "w") as zipf:
         for i, photo in enumerate(photos):
             file = await context.bot.get_file(photo.file_id)
@@ -59,20 +63,20 @@ async def process_and_send(photos, number, update: Update, context: ContextTypes
 
             zipf.write(file_path, arcname=f"{i+1}.jpg")
 
-    # отправка в Telegram (в ЛИЧКУ пользователя)
+    # отправка пользователю
     user_id = update.effective_user.id
 
     await context.bot.send_document(
         chat_id=user_id,
         document=open(zip_path, "rb"),
         filename=f"{folder_name}.zip",
-        caption="📦 Готово, архив собран"
+        caption="📦 Готово"
     )
 
-    await update.message.reply_text("Я все сохранил!")
+    processed_count += 1
 
 # =========================
-# ALBUM HANDLING
+# ALBUM FLUSH
 # =========================
 
 async def flush_album(group_id, context):
@@ -84,13 +88,7 @@ async def flush_album(group_id, context):
         album_numbers.pop(group_id, None)
         return
 
-    # fake update не нужен — берём context.bot.send_document через user_id позже
-    await process_and_send(
-        photos,
-        number,
-        albums[group_id]["update"],
-        context
-    )
+    await process_and_send(photos, number, albums[group_id], context)
 
     albums.pop(group_id, None)
     album_numbers.pop(group_id, None)
@@ -110,8 +108,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not number:
         return
 
-    await message.reply_text("Увидел, принял в работу!")
-
     group_id = message.media_group_id
 
     # одиночное фото
@@ -122,9 +118,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # альбом
     albums[group_id].append(message.photo[-1])
     album_numbers[group_id] = number
-    albums[group_id] = {"update": update}
 
-    # небольшая задержка перед финализацией
     await asyncio.sleep(3)
 
     photos = albums[group_id]
@@ -134,10 +128,37 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     album_numbers.pop(group_id, None)
 
 # =========================
+# STATS LOOP (30 min)
+# =========================
+
+async def stats_loop(app):
+    global processed_count, stats_chat_id
+
+    while True:
+        await asyncio.sleep(1800)
+
+        if processed_count == 0:
+            continue
+
+        if not stats_chat_id:
+            continue
+
+        await app.bot.send_message(
+            chat_id=stats_chat_id,
+            text=f"📊 За последние 30 минут обработано: {processed_count} вагонов"
+        )
+
+        processed_count = 0
+
+# =========================
 # START
 # =========================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global stats_chat_id
+
+    stats_chat_id = update.effective_chat.id
+
     await update.message.reply_text("Бот работает 🤖")
 
 # =========================
@@ -149,6 +170,8 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+
+    app.create_task(stats_loop(app))
 
     app.run_polling()
 
