@@ -3,20 +3,15 @@ import re
 import time
 import zipfile
 import datetime
-import base64
-import requests
+import smtplib
+import asyncio
 
+from email.message import EmailMessage
 from collections import defaultdict
 from threading import Timer
 
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
 # =========================
 # ENV
@@ -24,18 +19,18 @@ from telegram.ext import (
 
 TOKEN = os.getenv("BOT_TOKEN")
 
-EMAIL_FROM = os.getenv("EMAIL_FROM")
+EMAIL_USER = os.getenv("EMAIL_USER")
+EMAIL_PASS = os.getenv("EMAIL_PASS")
 EMAIL_TO = os.getenv("EMAIL_TO")
-SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 
-print("EMAIL_FROM DEBUG:", repr(EMAIL_FROM))
+print("EMAIL_USER:", EMAIL_USER)
+print("EMAIL_TO:", EMAIL_TO)
 
 # =========================
 # MEMORY
 # =========================
 
 albums = defaultdict(list)
-album_time = {}
 
 # =========================
 # UTILS
@@ -50,51 +45,32 @@ def extract_number(text: str):
     return match.group(0).replace("-", "")
 
 # =========================
-# SEND EMAIL (SendGrid API)
+# EMAIL (YANDEX SMTP)
 # =========================
 
 def send_email(subject, zip_path):
-    try:
-        print("📧 START EMAIL:", subject)
+    print("📧 START EMAIL:", subject)
 
-        with open(zip_path, "rb") as f:
-            encoded = base64.b64encode(f.read()).decode()
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = EMAIL_USER
+    msg["To"] = EMAIL_TO
+    msg.set_content("Архив с фото во вложении")
 
-        payload = {
-            "personalizations": [
-                {
-                    "to": [{"email": EMAIL_TO}],
-                    "subject": subject
-                }
-            ],
-            "from": {"email": EMAIL_FROM},
-            "content": [
-                {
-                    "type": "text/plain",
-                    "value": "Архив с фото во вложении"
-                }
-            ],
-            "attachments": [
-                {
-                    "content": encoded,
-                    "type": "application/zip",
-                    "filename": f"{subject}.zip"
-                }
-            ]
-        }
-
-        headers = {
-            "Authorization": f"Bearer {SENDGRID_API_KEY}",
-            "Content-Type": "application/json"
-        }
-
-        response = requests.post(
-            "https://api.sendgrid.com/v3/mail/send",
-            json=payload,
-            headers=headers
+    with open(zip_path, "rb") as f:
+        msg.add_attachment(
+            f.read(),
+            maintype="application",
+            subtype="zip",
+            filename=os.path.basename(zip_path),
         )
 
-        print("SENDGRID STATUS:", response.status_code, response.text)
+    try:
+        with smtplib.SMTP_SSL("smtp.yandex.ru", 465) as smtp:
+            smtp.login(EMAIL_USER, EMAIL_PASS)
+            smtp.send_message(msg)
+
+        print("✅ EMAIL SENT SUCCESS")
 
     except Exception as e:
         print("❌ EMAIL ERROR:", e)
@@ -118,7 +94,8 @@ async def process_and_send(photos, number, update, context):
 
             zipf.write(file_path, arcname=f"{i+1}.jpg")
 
-    send_email(folder_name, zip_path)
+    # отправка в фоне
+    asyncio.create_task(asyncio.to_thread(send_email, folder_name, zip_path))
 
     if update:
         await update.message.reply_text("Я все сохранил!")
@@ -132,21 +109,14 @@ async def flush_album(group_id, context):
     if not photos:
         return
 
-    # пока упрощённо
     number = "00000000"
 
     await process_and_send(photos, number, None, context)
 
     albums.pop(group_id, None)
-    album_time.pop(group_id, None)
-
-# =========================
-# TIMER
-# =========================
 
 def schedule_flush(group_id, context):
     def run():
-        import asyncio
         asyncio.run_coroutine_threadsafe(
             flush_album(group_id, context),
             context.application.loop
@@ -176,8 +146,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # альбом
     if group_id:
         albums[group_id].append(message.photo[-1])
-        album_time[group_id] = time.time()
-
         schedule_flush(group_id, context)
         return
 
@@ -192,6 +160,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Бот работает 🤖")
 
 # =========================
+# ERROR HANDLER
+# =========================
+
+async def error_handler(update, context):
+    print("❌ ERROR:", context.error)
+
+# =========================
 # MAIN
 # =========================
 
@@ -200,6 +175,8 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+
+    app.add_error_handler(error_handler)
 
     app.run_polling()
 
