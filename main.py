@@ -28,6 +28,7 @@ TOKEN = os.getenv("BOT_TOKEN")
 album_buffer = defaultdict(dict)     # {group_id: {file_id: photo}}
 album_last_update = {}
 
+processed_albums = set()             # 🔥 защита от дублей
 processed_count = 0
 stats_chat_id = None
 
@@ -44,7 +45,7 @@ def extract_number(text: str):
     return match.group(0).replace("-", "")
 
 # =========================
-# ZIP + SEND (FIXED)
+# ZIP + SEND (STABLE)
 # =========================
 
 async def process_and_send(photos, number, update, context):
@@ -54,7 +55,7 @@ async def process_and_send(photos, number, update, context):
     folder_name = f"{date}_вагон_{number or 'unknown'}"
     zip_path = f"/tmp/{folder_name}.zip"
 
-    # создаём zip
+    # ZIP сборка
     with zipfile.ZipFile(zip_path, "w") as zipf:
         for i, photo in enumerate(photos):
             file = await context.bot.get_file(photo.file_id)
@@ -67,7 +68,7 @@ async def process_and_send(photos, number, update, context):
     user_id = update.effective_user.id if update else stats_chat_id
 
     if user_id:
-        # 🔥 ВАЖНО: корректное открытие + таймауты
+        # 🔥 стабильная отправка без WriteTimeout
         with open(zip_path, "rb") as f:
             await context.bot.send_document(
                 chat_id=user_id,
@@ -106,7 +107,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     album_last_update[group_id] = time.time()
 
 # =========================
-# ALBUM WATCHER (6s + stable)
+# ALBUM WATCHER (DEDUP FIX)
 # =========================
 
 async def album_watcher(app):
@@ -116,9 +117,16 @@ async def album_watcher(app):
         now = time.time()
 
         for gid in list(album_buffer.keys()):
+
+            # 🔥 защита от повторной обработки
+            if gid in processed_albums:
+                album_buffer.pop(gid, None)
+                album_last_update.pop(gid, None)
+                continue
+
             last = album_last_update.get(gid, 0)
 
-            # ждём 6 секунд тишины
+            # 1 фаза — 6 сек тишины
             if now - last < 6:
                 continue
 
@@ -128,7 +136,7 @@ async def album_watcher(app):
 
             size1 = len(data)
 
-            # проверка стабильности
+            # 2 фаза — проверка стабильности
             await asyncio.sleep(2)
 
             data2 = album_buffer.get(gid, {})
@@ -141,6 +149,9 @@ async def album_watcher(app):
 
             if not photos:
                 continue
+
+            # 🔥 помечаем как обработанный
+            processed_albums.add(gid)
 
             await process_and_send(photos, None, None, app)
 
