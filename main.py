@@ -63,7 +63,6 @@ async def process_and_send(photos, number, update: Update, context: ContextTypes
 
             zipf.write(file_path, arcname=f"{i+1}.jpg")
 
-    # отправка пользователю
     user_id = update.effective_user.id
 
     await context.bot.send_document(
@@ -74,24 +73,6 @@ async def process_and_send(photos, number, update: Update, context: ContextTypes
     )
 
     processed_count += 1
-
-# =========================
-# ALBUM FLUSH
-# =========================
-
-async def flush_album(group_id, context):
-    photos = albums.get(group_id)
-    number = album_numbers.get(group_id)
-
-    if not photos or not number:
-        albums.pop(group_id, None)
-        album_numbers.pop(group_id, None)
-        return
-
-    await process_and_send(photos, number, albums[group_id], context)
-
-    albums.pop(group_id, None)
-    album_numbers.pop(group_id, None)
 
 # =========================
 # HANDLER
@@ -128,7 +109,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     album_numbers.pop(group_id, None)
 
 # =========================
-# STATS LOOP (30 min)
+# STATS LOOP
 # =========================
 
 async def stats_loop(app):
@@ -157,21 +138,31 @@ async def stats_loop(app):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global stats_chat_id
 
-    stats_chat_id = update.effective_chat.id
+    stats_chat_id = update.effective_user.id
 
     await update.message.reply_text("Бот работает 🤖")
+
+# =========================
+# POST INIT (ВАЖНО)
+# =========================
+
+async def post_init(app):
+    app.create_task(stats_loop(app))
 
 # =========================
 # MAIN
 # =========================
 
 def main():
-    app = ApplicationBuilder().token(TOKEN).build()
+    app = (
+        ApplicationBuilder()
+        .token(TOKEN)
+        .post_init(post_init)
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-
-    app.create_task(stats_loop(app))
 
     app.run_polling()
 
