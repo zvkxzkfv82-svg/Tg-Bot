@@ -25,7 +25,7 @@ TOKEN = os.getenv("BOT_TOKEN")
 # STATE
 # =========================
 
-album_buffer = defaultdict(dict)   # {group_id: {file_id: photo}}
+album_buffer = defaultdict(dict)     # {group_id: {file_id: photo}}
 album_last_update = {}
 
 processed_count = 0
@@ -51,7 +51,7 @@ async def process_and_send(photos, number, update, context):
     global processed_count
 
     date = datetime.datetime.now().strftime("%Y-%m-%d")
-    folder_name = f"{date}_вагон_{number}"
+    folder_name = f"{date}_вагон_{number or 'unknown'}"
     zip_path = f"/tmp/{folder_name}.zip"
 
     with zipfile.ZipFile(zip_path, "w") as zipf:
@@ -96,14 +96,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # альбом
-    if group_id not in album_buffer:
-        album_buffer[group_id] = {}
-
     album_buffer[group_id][photo.file_id] = photo
     album_last_update[group_id] = time.time()
 
 # =========================
-# ALBUM WATCHER (STABLE FIX)
+# ALBUM WATCHER (2 PHASE FIX)
 # =========================
 
 async def album_watcher(app):
@@ -115,28 +112,31 @@ async def album_watcher(app):
         for gid in list(album_buffer.keys()):
             last = album_last_update.get(gid, 0)
 
-            # ждём тишину
-            if now - last < 4:
+            # ФАЗА 1: ждём 6 секунд тишины
+            if now - last < 6:
                 continue
 
-            data = album_buffer[gid]
-            size_before = len(data)
-
-            await asyncio.sleep(1)
-
-            # если размер изменился — значит ещё идут фото
-            if len(album_buffer.get(gid, {})) != size_before:
+            data = album_buffer.get(gid, {})
+            if not data:
                 continue
 
-            photos = list(data.values())
-            number = None
+            size1 = len(data)
 
-            # номер берём из любого сообщения (если есть)
-            if photos:
-                number = extract_number(None)
+            # ФАЗА 2: проверка стабильности
+            await asyncio.sleep(2)
 
-            if photos:
-                await process_and_send(photos, number, None, app)
+            data2 = album_buffer.get(gid, {})
+            size2 = len(data2)
+
+            if size1 != size2:
+                continue
+
+            photos = list(data2.values())
+
+            if not photos:
+                continue
+
+            await process_and_send(photos, None, None, app)
 
             album_buffer.pop(gid, None)
             album_last_update.pop(gid, None)
@@ -162,7 +162,7 @@ async def stats_loop(app):
         processed_count = 0
 
 # =========================
-# START
+# START COMMAND
 # =========================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
