@@ -25,14 +25,15 @@ TOKEN = os.getenv("BOT_TOKEN")
 # STATE
 # =========================
 
-# теперь храним и фото, и номер
 album_buffer = defaultdict(lambda: {
-    "photos": {},   # {file_id: photo}
+    "photos": {},
     "number": None
 })
 
 album_last_update = {}
 processed_albums = set()
+
+queue = asyncio.Queue()
 
 processed_count = 0
 stats_chat_id = None
@@ -86,6 +87,21 @@ async def process_and_send(photos, number, update, context):
     processed_count += 1
 
 # =========================
+# WORKER (ОЧЕРЕДЬ)
+# =========================
+
+async def worker(app):
+    while True:
+        photos, number = await queue.get()
+
+        try:
+            await process_and_send(photos, number, None, app)
+        except Exception as e:
+            print("❌ WORKER ERROR:", e)
+
+        queue.task_done()
+
+# =========================
 # HANDLER
 # =========================
 
@@ -102,7 +118,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # одиночное фото
     if not group_id:
         if number:
-            await process_and_send([photo], number, update, context)
+            await queue.put(([photo], number))
         return
 
     # альбом
@@ -110,14 +126,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     album["photos"][photo.file_id] = photo
 
-    # сохраняем номер (только первый найденный)
     if number and not album["number"]:
         album["number"] = number
 
     album_last_update[group_id] = time.time()
 
 # =========================
-# WATCHER (2 PHASE + DEDUP)
+# WATCHER
 # =========================
 
 async def album_watcher(app):
@@ -128,7 +143,6 @@ async def album_watcher(app):
 
         for gid in list(album_buffer.keys()):
 
-            # защита от дублей
             if gid in processed_albums:
                 album_buffer.pop(gid, None)
                 album_last_update.pop(gid, None)
@@ -136,7 +150,6 @@ async def album_watcher(app):
 
             last = album_last_update.get(gid, 0)
 
-            # фаза 1 — 6 сек тишины
             if now - last < 6:
                 continue
 
@@ -148,7 +161,6 @@ async def album_watcher(app):
 
             size1 = len(photos_dict)
 
-            # фаза 2 — проверка стабильности
             await asyncio.sleep(2)
 
             album2 = album_buffer.get(gid, {})
@@ -166,7 +178,8 @@ async def album_watcher(app):
 
             processed_albums.add(gid)
 
-            await process_and_send(photos, number, None, app)
+            # 🔥 КЛЮЧ: кладём в очередь, а не отправляем сразу
+            await queue.put((photos, number))
 
             album_buffer.pop(gid, None)
             album_last_update.pop(gid, None)
@@ -208,6 +221,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def post_init(app):
     asyncio.create_task(album_watcher(app))
     asyncio.create_task(stats_loop(app))
+
+    # 🔥 запускаем 2 воркера (можно увеличить до 3)
+    asyncio.create_task(worker(app))
+    asyncio.create_task(worker(app))
 
 # =========================
 # MAIN
