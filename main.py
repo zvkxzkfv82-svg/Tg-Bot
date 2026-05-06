@@ -25,8 +25,7 @@ TOKEN = os.getenv("BOT_TOKEN")
 # STATE
 # =========================
 
-album_buffer = defaultdict(set)      # file_ids
-album_numbers = {}
+album_buffer = defaultdict(dict)   # {group_id: {file_id: photo}}
 album_last_update = {}
 
 processed_count = 0
@@ -48,7 +47,7 @@ def extract_number(text: str):
 # ZIP + SEND
 # =========================
 
-async def process_and_send(photo_wrappers, number, update, context):
+async def process_and_send(photos, number, update, context):
     global processed_count
 
     date = datetime.datetime.now().strftime("%Y-%m-%d")
@@ -56,7 +55,7 @@ async def process_and_send(photo_wrappers, number, update, context):
     zip_path = f"/tmp/{folder_name}.zip"
 
     with zipfile.ZipFile(zip_path, "w") as zipf:
-        for i, photo in enumerate(photo_wrappers):
+        for i, photo in enumerate(photos):
             file = await context.bot.get_file(photo.file_id)
 
             file_path = f"/tmp/{photo.file_id}.jpg"
@@ -77,34 +76,34 @@ async def process_and_send(photo_wrappers, number, update, context):
     processed_count += 1
 
 # =========================
-# PHOTO HANDLER
+# HANDLER
 # =========================
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
+    msg = update.message
 
-    if not message.photo:
+    if not msg.photo:
         return
 
-    number = extract_number(message.caption)
-    if not number:
-        return
-
-    group_id = message.media_group_id
-    photo = message.photo[-1]
+    group_id = msg.media_group_id
+    photo = msg.photo[-1]
+    number = extract_number(msg.caption)
 
     # одиночное фото
     if not group_id:
-        await process_and_send([photo], number, update, context)
+        if number:
+            await process_and_send([photo], number, update, context)
         return
 
     # альбом
-    album_buffer[group_id].add(photo.file_id)
-    album_numbers[group_id] = number
+    if group_id not in album_buffer:
+        album_buffer[group_id] = {}
+
+    album_buffer[group_id][photo.file_id] = photo
     album_last_update[group_id] = time.time()
 
 # =========================
-# ALBUM WATCHER (STABLE)
+# ALBUM WATCHER (STABLE FIX)
 # =========================
 
 async def album_watcher(app):
@@ -113,32 +112,34 @@ async def album_watcher(app):
 
         now = time.time()
 
-        for group_id in list(album_buffer.keys()):
-            last = album_last_update.get(group_id, 0)
+        for gid in list(album_buffer.keys()):
+            last = album_last_update.get(gid, 0)
 
-            # ждём стабилизации альбома
-            if now - last > 3:
+            # ждём тишину
+            if now - last < 4:
+                continue
 
-                # финальная защита от “долетающих” фото
-                await asyncio.sleep(1)
+            data = album_buffer[gid]
+            size_before = len(data)
 
-                if time.time() - album_last_update.get(group_id, 0) < 2:
-                    continue
+            await asyncio.sleep(1)
 
-                file_ids = list(album_buffer[group_id])
-                number = album_numbers.get(group_id)
+            # если размер изменился — значит ещё идут фото
+            if len(album_buffer.get(gid, {})) != size_before:
+                continue
 
-                photos = [
-                    type("P", (), {"file_id": fid})
-                    for fid in file_ids
-                ]
+            photos = list(data.values())
+            number = None
 
-                if photos and number:
-                    await process_and_send(photos, number, None, app)
+            # номер берём из любого сообщения (если есть)
+            if photos:
+                number = extract_number(None)
 
-                album_buffer.pop(group_id, None)
-                album_numbers.pop(group_id, None)
-                album_last_update.pop(group_id, None)
+            if photos:
+                await process_and_send(photos, number, None, app)
+
+            album_buffer.pop(gid, None)
+            album_last_update.pop(gid, None)
 
 # =========================
 # STATS LOOP
