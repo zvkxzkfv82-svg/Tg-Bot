@@ -3,7 +3,6 @@ import re
 import zipfile
 import datetime
 import asyncio
-import time
 
 from collections import defaultdict
 
@@ -28,7 +27,7 @@ TOKEN = os.getenv("BOT_TOKEN")
 
 albums = defaultdict(list)
 album_numbers = {}
-album_timers = {}
+album_tasks = {}  # debounce tasks
 
 processed_count = 0
 stats_chat_id = None
@@ -78,6 +77,23 @@ async def process_and_send(photos, number, update, context):
     processed_count += 1
 
 # =========================
+# FINALIZE ALBUM (DEBOUNCE)
+# =========================
+
+async def finalize_album(group_id, update, context):
+    await asyncio.sleep(2)
+
+    photos = albums.get(group_id, [])
+    number = album_numbers.get(group_id)
+
+    if photos and number:
+        await process_and_send(photos, number, update, context)
+
+    albums.pop(group_id, None)
+    album_numbers.pop(group_id, None)
+    album_tasks.pop(group_id, None)
+
+# =========================
 # HANDLER
 # =========================
 
@@ -98,35 +114,18 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await process_and_send([message.photo[-1]], number, update, context)
         return
 
-    # альбом: копим
+    # сохраняем фото в альбом
     albums[group_id].append(message.photo[-1])
     album_numbers[group_id] = number
-    album_timers[group_id] = time.time()
 
-# =========================
-# ALBUM WATCHER (DEBOUNCE ENGINE)
-# =========================
+    # debounce: отменяем старую задачу
+    if group_id in album_tasks:
+        album_tasks[group_id].cancel()
 
-async def album_watcher(app):
-    while True:
-        await asyncio.sleep(1)
-
-        now = time.time()
-
-        for group_id in list(albums.keys()):
-            last_time = album_timers.get(group_id)
-
-            # если 2 секунды тишины → финал
-            if last_time and now - last_time > 2:
-                photos = albums[group_id]
-                number = album_numbers.get(group_id)
-
-                if photos and number:
-                    await process_and_send(photos, number, None, app)
-
-                albums.pop(group_id, None)
-                album_numbers.pop(group_id, None)
-                album_timers.pop(group_id, None)
+    # создаём новую задачу
+    album_tasks[group_id] = asyncio.create_task(
+        finalize_album(group_id, update, context)
+    )
 
 # =========================
 # STATS LOOP
@@ -138,15 +137,12 @@ async def stats_loop(app):
     while True:
         await asyncio.sleep(1800)
 
-        if processed_count == 0:
-            continue
-
-        if not stats_chat_id:
+        if processed_count == 0 or not stats_chat_id:
             continue
 
         await app.bot.send_message(
             chat_id=stats_chat_id,
-            text=f"📊 За последние 30 минут обработано: {processed_count} вагонов"
+            text=f"📊 За 30 минут: {processed_count} вагонов"
         )
 
         processed_count = 0
@@ -159,16 +155,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global stats_chat_id
 
     stats_chat_id = update.effective_user.id
-
     await update.message.reply_text("Бот работает 🤖")
 
 # =========================
-# POST INIT (ПРАВИЛЬНЫЙ СПОСОБ)
+# POST INIT
 # =========================
 
 async def post_init(app):
     asyncio.create_task(stats_loop(app))
-    asyncio.create_task(album_watcher(app))
 
 # =========================
 # MAIN
