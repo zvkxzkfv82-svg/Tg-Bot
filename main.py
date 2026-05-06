@@ -3,6 +3,7 @@ import re
 import zipfile
 import datetime
 import asyncio
+import time
 
 from collections import defaultdict
 
@@ -27,6 +28,7 @@ TOKEN = os.getenv("BOT_TOKEN")
 
 albums = defaultdict(list)
 album_numbers = {}
+album_timers = {}
 
 processed_count = 0
 stats_chat_id = None
@@ -63,14 +65,15 @@ async def process_and_send(photos, number, update: Update, context: ContextTypes
 
             zipf.write(file_path, arcname=f"{i+1}.jpg")
 
-    user_id = update.effective_user.id
+    user_id = update.effective_user.id if update else stats_chat_id
 
-    await context.bot.send_document(
-        chat_id=user_id,
-        document=open(zip_path, "rb"),
-        filename=f"{folder_name}.zip",
-        caption="📦 Готово"
-    )
+    if user_id:
+        await context.bot.send_document(
+            chat_id=user_id,
+            document=open(zip_path, "rb"),
+            filename=f"{folder_name}.zip",
+            caption="📦 Готово"
+        )
 
     processed_count += 1
 
@@ -85,7 +88,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     number = extract_number(message.caption)
-
     if not number:
         return
 
@@ -99,14 +101,31 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # альбом
     albums[group_id].append(message.photo[-1])
     album_numbers[group_id] = number
+    album_timers[group_id] = time.time()
 
-    await asyncio.sleep(3)
+# =========================
+# ALBUM WATCHER (DEBOUNCE)
+# =========================
 
-    photos = albums[group_id]
-    await process_and_send(photos, number, update, context)
+async def album_watcher(app):
+    while True:
+        await asyncio.sleep(1)
 
-    albums.pop(group_id, None)
-    album_numbers.pop(group_id, None)
+        now = time.time()
+
+        for group_id in list(albums.keys()):
+            last_time = album_timers.get(group_id)
+
+            if last_time and now - last_time > 2:
+                photos = albums[group_id]
+                number = album_numbers.get(group_id)
+
+                if photos and number:
+                    await process_and_send(photos, number, None, app)
+
+                albums.pop(group_id, None)
+                album_numbers.pop(group_id, None)
+                album_timers.pop(group_id, None)
 
 # =========================
 # STATS LOOP
@@ -143,11 +162,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Бот работает 🤖")
 
 # =========================
-# POST INIT (ВАЖНО)
+# POST INIT
 # =========================
 
 async def post_init(app):
     app.create_task(stats_loop(app))
+    app.create_task(album_watcher(app))
 
 # =========================
 # MAIN
