@@ -11,7 +11,13 @@ from collections import defaultdict
 from threading import Timer
 
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
 
 # =========================
 # ENV
@@ -31,6 +37,7 @@ print("EMAIL_TO:", EMAIL_TO)
 # =========================
 
 albums = defaultdict(list)
+album_numbers = {}
 
 # =========================
 # UTILS
@@ -45,7 +52,7 @@ def extract_number(text: str):
     return match.group(0).replace("-", "")
 
 # =========================
-# EMAIL (YANDEX SMTP)
+# EMAIL (SMTP 587 STARTTLS)
 # =========================
 
 def send_email(subject, zip_path):
@@ -66,14 +73,18 @@ def send_email(subject, zip_path):
         )
 
     try:
-        with smtplib.SMTP_SSL("smtp.yandex.ru", 465) as smtp:
+        with smtplib.SMTP("smtp.yandex.ru", 587, timeout=30) as smtp:
+            smtp.ehlo()
+            smtp.starttls()
+            smtp.ehlo()
+
             smtp.login(EMAIL_USER, EMAIL_PASS)
             smtp.send_message(msg)
 
         print("✅ EMAIL SENT SUCCESS")
 
     except Exception as e:
-        print("❌ EMAIL ERROR:", e)
+        print("❌ EMAIL ERROR:", repr(e))
 
 # =========================
 # ZIP + SEND
@@ -94,7 +105,7 @@ async def process_and_send(photos, number, update, context):
 
             zipf.write(file_path, arcname=f"{i+1}.jpg")
 
-    # отправка в фоне
+    # отправка в фоне (чтобы бот не зависал)
     asyncio.create_task(asyncio.to_thread(send_email, folder_name, zip_path))
 
     if update:
@@ -106,20 +117,23 @@ async def process_and_send(photos, number, update, context):
 
 async def flush_album(group_id, context):
     photos = albums.get(group_id)
-    if not photos:
-        return
+    number = album_numbers.get(group_id)
 
-    number = "00000000"
+    if not photos or not number:
+        albums.pop(group_id, None)
+        album_numbers.pop(group_id, None)
+        return
 
     await process_and_send(photos, number, None, context)
 
     albums.pop(group_id, None)
+    album_numbers.pop(group_id, None)
 
 def schedule_flush(group_id, context):
     def run():
         asyncio.run_coroutine_threadsafe(
             flush_album(group_id, context),
-            context.application.loop
+            context.application.loop,
         )
 
     Timer(3, run).start()
@@ -143,14 +157,16 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     group_id = message.media_group_id
 
-    # альбом
-    if group_id:
-        albums[group_id].append(message.photo[-1])
-        schedule_flush(group_id, context)
+    # одиночное фото
+    if not group_id:
+        await process_and_send([message.photo[-1]], number, update, context)
         return
 
-    # одиночное фото
-    await process_and_send([message.photo[-1]], number, update, context)
+    # альбом
+    albums[group_id].append(message.photo[-1])
+    album_numbers[group_id] = number
+
+    schedule_flush(group_id, context)
 
 # =========================
 # START
@@ -175,7 +191,6 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-
     app.add_error_handler(error_handler)
 
     app.run_polling()
