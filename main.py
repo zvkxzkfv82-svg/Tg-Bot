@@ -25,10 +25,15 @@ TOKEN = os.getenv("BOT_TOKEN")
 # STATE
 # =========================
 
-album_buffer = defaultdict(dict)     # {group_id: {file_id: photo}}
-album_last_update = {}
+# теперь храним и фото, и номер
+album_buffer = defaultdict(lambda: {
+    "photos": {},   # {file_id: photo}
+    "number": None
+})
 
-processed_albums = set()             # 🔥 защита от дублей
+album_last_update = {}
+processed_albums = set()
+
 processed_count = 0
 stats_chat_id = None
 
@@ -45,7 +50,7 @@ def extract_number(text: str):
     return match.group(0).replace("-", "")
 
 # =========================
-# ZIP + SEND (STABLE)
+# ZIP + SEND
 # =========================
 
 async def process_and_send(photos, number, update, context):
@@ -55,7 +60,6 @@ async def process_and_send(photos, number, update, context):
     folder_name = f"{date}_вагон_{number or 'unknown'}"
     zip_path = f"/tmp/{folder_name}.zip"
 
-    # ZIP сборка
     with zipfile.ZipFile(zip_path, "w") as zipf:
         for i, photo in enumerate(photos):
             file = await context.bot.get_file(photo.file_id)
@@ -68,7 +72,6 @@ async def process_and_send(photos, number, update, context):
     user_id = update.effective_user.id if update else stats_chat_id
 
     if user_id:
-        # 🔥 стабильная отправка без WriteTimeout
         with open(zip_path, "rb") as f:
             await context.bot.send_document(
                 chat_id=user_id,
@@ -103,11 +106,18 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # альбом
-    album_buffer[group_id][photo.file_id] = photo
+    album = album_buffer[group_id]
+
+    album["photos"][photo.file_id] = photo
+
+    # сохраняем номер (только первый найденный)
+    if number and not album["number"]:
+        album["number"] = number
+
     album_last_update[group_id] = time.time()
 
 # =========================
-# ALBUM WATCHER (DEDUP FIX)
+# WATCHER (2 PHASE + DEDUP)
 # =========================
 
 async def album_watcher(app):
@@ -118,7 +128,7 @@ async def album_watcher(app):
 
         for gid in list(album_buffer.keys()):
 
-            # 🔥 защита от повторной обработки
+            # защита от дублей
             if gid in processed_albums:
                 album_buffer.pop(gid, None)
                 album_last_update.pop(gid, None)
@@ -126,40 +136,43 @@ async def album_watcher(app):
 
             last = album_last_update.get(gid, 0)
 
-            # 1 фаза — 6 сек тишины
+            # фаза 1 — 6 сек тишины
             if now - last < 6:
                 continue
 
-            data = album_buffer.get(gid, {})
-            if not data:
+            album = album_buffer.get(gid, {})
+            photos_dict = album.get("photos", {})
+
+            if not photos_dict:
                 continue
 
-            size1 = len(data)
+            size1 = len(photos_dict)
 
-            # 2 фаза — проверка стабильности
+            # фаза 2 — проверка стабильности
             await asyncio.sleep(2)
 
-            data2 = album_buffer.get(gid, {})
-            size2 = len(data2)
+            album2 = album_buffer.get(gid, {})
+            photos_dict2 = album2.get("photos", {})
+            size2 = len(photos_dict2)
 
             if size1 != size2:
                 continue
 
-            photos = list(data2.values())
+            photos = list(photos_dict2.values())
+            number = album2.get("number")
 
             if not photos:
                 continue
 
-            # 🔥 помечаем как обработанный
             processed_albums.add(gid)
 
-            await process_and_send(photos, None, None, app)
+            await process_and_send(photos, number, None, app)
 
             album_buffer.pop(gid, None)
             album_last_update.pop(gid, None)
 
 # =========================
-# STATS LOOP
+# STATS
 # =========================
 
 async def stats_loop(app):
