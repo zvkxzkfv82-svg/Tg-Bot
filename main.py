@@ -20,6 +20,7 @@ from telegram.ext import (
 # =========================
 
 TOKEN = os.getenv("BOT_TOKEN")
+OWNER_CHAT_ID = int(os.getenv("OWNER_CHAT_ID"))
 
 # =========================
 # STATE
@@ -36,7 +37,6 @@ processed_albums = set()
 queue = asyncio.Queue()
 
 processed_count = 0
-stats_chat_id = None
 
 # =========================
 # UTILS
@@ -45,67 +45,91 @@ stats_chat_id = None
 def extract_number(text: str):
     if not text:
         return None
+
     match = re.search(r"\d{3}-?\d{5}", text)
+
     if not match:
         return None
+
     return match.group(0).replace("-", "")
 
 # =========================
 # ZIP + SEND
 # =========================
 
-async def process_and_send(photos, number, update, context):
+async def process_and_send(photos, number, context):
     global processed_count
 
-    date = datetime.datetime.now().strftime("%Y-%m-%d")
-    folder_name = f"{date}_вагон_{number or 'unknown'}"
-    zip_path = f"/tmp/{folder_name}.zip"
+    try:
+        date = datetime.datetime.now().strftime("%Y-%m-%d")
+        folder_name = f"{date}_вагон_{number or 'unknown'}"
 
-    with zipfile.ZipFile(zip_path, "w") as zipf:
-        for i, photo in enumerate(photos):
-            file = await context.bot.get_file(photo.file_id)
+        zip_path = f"/tmp/{folder_name}.zip"
 
-            file_path = f"/tmp/{photo.file_id}.jpg"
-            await file.download_to_drive(file_path)
+        # создаем zip
+        with zipfile.ZipFile(zip_path, "w") as zipf:
 
-            zipf.write(file_path, arcname=f"{i+1}.jpg")
+            for i, photo in enumerate(photos):
 
-    user_id = update.effective_user.id if update else stats_chat_id
+                file = await context.bot.get_file(photo.file_id)
 
-    if user_id:
+                file_path = f"/tmp/{photo.file_id}.jpg"
+
+                await file.download_to_drive(file_path)
+
+                zipf.write(
+                    file_path,
+                    arcname=f"{i+1}.jpg"
+                )
+
+        # отправка владельцу
         with open(zip_path, "rb") as f:
+
             await context.bot.send_document(
-                chat_id=user_id,
+                chat_id=OWNER_CHAT_ID,
                 document=f,
                 filename=f"{folder_name}.zip",
-                caption="📦 Готово",
+                caption=f"📦 {folder_name}",
                 read_timeout=120,
                 write_timeout=120,
                 connect_timeout=60,
             )
 
-    processed_count += 1
+        processed_count += 1
+
+        print(f"✅ SENT: {folder_name}")
+
+    except Exception as e:
+        print("❌ SEND ERROR:", repr(e))
 
 # =========================
-# WORKER (ОЧЕРЕДЬ)
+# WORKER
 # =========================
 
 async def worker(app):
+
     while True:
+
         photos, number = await queue.get()
 
         try:
-            await process_and_send(photos, number, None, app)
+            await process_and_send(
+                photos,
+                number,
+                app
+            )
+
         except Exception as e:
-            print("❌ WORKER ERROR:", e)
+            print("❌ WORKER ERROR:", repr(e))
 
         queue.task_done()
 
 # =========================
-# HANDLER
+# PHOTO HANDLER
 # =========================
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     msg = update.message
 
     if not msg.photo:
@@ -113,47 +137,64 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     group_id = msg.media_group_id
     photo = msg.photo[-1]
+
     number = extract_number(msg.caption)
 
-    # одиночное фото
+    # =====================
+    # ОДИНОЧНОЕ ФОТО
+    # =====================
+
     if not group_id:
+
         if number:
             await queue.put(([photo], number))
+
         return
 
-    # альбом
+    # =====================
+    # АЛЬБОМ
+    # =====================
+
     album = album_buffer[group_id]
 
     album["photos"][photo.file_id] = photo
 
+    # сохраняем номер
     if number and not album["number"]:
         album["number"] = number
 
     album_last_update[group_id] = time.time()
 
 # =========================
-# WATCHER
+# ALBUM WATCHER
 # =========================
 
 async def album_watcher(app):
+
     while True:
+
         await asyncio.sleep(1)
 
         now = time.time()
 
         for gid in list(album_buffer.keys()):
 
+            # защита от дублей
             if gid in processed_albums:
+
                 album_buffer.pop(gid, None)
                 album_last_update.pop(gid, None)
+
                 continue
 
             last = album_last_update.get(gid, 0)
 
+            # 1 фаза: 6 сек тишины
             if now - last < 6:
                 continue
 
             album = album_buffer.get(gid, {})
+
             photos_dict = album.get("photos", {})
 
             if not photos_dict:
@@ -161,76 +202,106 @@ async def album_watcher(app):
 
             size1 = len(photos_dict)
 
+            # 2 фаза: стабилизация
             await asyncio.sleep(2)
 
             album2 = album_buffer.get(gid, {})
+
             photos_dict2 = album2.get("photos", {})
+
             size2 = len(photos_dict2)
 
             if size1 != size2:
                 continue
 
             photos = list(photos_dict2.values())
-            number = album2.get("number")
 
             if not photos:
                 continue
 
+            number = album2.get("number")
+
+            # помечаем как обработанный
             processed_albums.add(gid)
 
-            # 🔥 КЛЮЧ: кладём в очередь, а не отправляем сразу
+            # в очередь
             await queue.put((photos, number))
 
+            # cleanup
             album_buffer.pop(gid, None)
             album_last_update.pop(gid, None)
 
 # =========================
-# STATS
+# STATS LOOP
 # =========================
 
 async def stats_loop(app):
-    global processed_count, stats_chat_id
+
+    global processed_count
 
     while True:
+
         await asyncio.sleep(1800)
 
-        if processed_count == 0 or not stats_chat_id:
+        if processed_count == 0:
             continue
 
-        await app.bot.send_message(
-            chat_id=stats_chat_id,
-            text=f"📊 За 30 минут: {processed_count} вагонов"
-        )
+        try:
 
-        processed_count = 0
+            await app.bot.send_message(
+                chat_id=OWNER_CHAT_ID,
+                text=f"📊 За 30 минут обработано: {processed_count} вагонов"
+            )
+
+            processed_count = 0
+
+        except Exception as e:
+            print("❌ STATS ERROR:", repr(e))
 
 # =========================
 # START
 # =========================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global stats_chat_id
 
-    stats_chat_id = update.effective_user.id
-    await update.message.reply_text("Бот работает 🤖")
+    if update.effective_user.is_bot:
+        return
+        
+    print(update.effective_user.id)
+
+    await update.message.reply_text(
+        "🤖 Бот работает"
+    )
 
 # =========================
 # POST INIT
 # =========================
 
 async def post_init(app):
-    asyncio.create_task(album_watcher(app))
-    asyncio.create_task(stats_loop(app))
 
-    # 🔥 запускаем 2 воркера (можно увеличить до 3)
-    asyncio.create_task(worker(app))
-    asyncio.create_task(worker(app))
+    # watcher
+    asyncio.create_task(
+        album_watcher(app)
+    )
+
+    # stats
+    asyncio.create_task(
+        stats_loop(app)
+    )
+
+    # workers
+    for _ in range(2):
+
+        asyncio.create_task(
+            worker(app)
+        )
 
 # =========================
 # MAIN
 # =========================
 
 def main():
+
     app = (
         ApplicationBuilder()
         .token(TOKEN)
@@ -238,8 +309,18 @@ def main():
         .build()
     )
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(
+        CommandHandler("start", start)
+    )
+
+    app.add_handler(
+        MessageHandler(
+            filters.PHOTO,
+            handle_photo
+        )
+    )
+
+    print("🚀 BOT STARTED")
 
     app.run_polling()
 
